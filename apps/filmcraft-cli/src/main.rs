@@ -40,6 +40,14 @@ use filmcraft_engine::Session;
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// `--progress`: long commands report `progress <fraction>` lines on stderr while they run.
+static PROGRESS: AtomicBool = AtomicBool::new(false);
+
+/// Commands that run as a job and wait for it unless told otherwise.
+fn waits(id: &str) -> bool {
+    filmcraft_automation::long_job::LONG_COMMANDS.contains(&id) || id == "masks.track"
+}
+
 /// Set once a write to stdout has failed; later output is dropped.
 static STDOUT_GONE: AtomicBool = AtomicBool::new(false);
 /// Set when stdout failed for a reason other than a closed reader: the exit status becomes 1.
@@ -80,6 +88,7 @@ SUBCOMMANDS
   export <out> [--preset name] [--format f] [--range r] [--start s --end s] [--settings json]
          [--gpu-rendering auto|off]
          [--scale f] [--quality 0-100] [--no-audio] [--queue] [--allow-offline]
+         [--on <ssh-host> [--remote-cli path]]
                                 export the active sequence and wait for it to finish: with an
                                 export preset (`export --list-presets`; built-in or the user's), or
                                 a format (h264|hevc|prores|dnxhr|apv|mjpeg|mxf-op1a|mxf-opatom|png|tiff|bmp|gif|wav|aiff|aac|mp3, guessed
@@ -90,7 +99,10 @@ SUBCOMMANDS
                                 leaves the sound out; --queue adds to the export queue and runs it
                                 instead. Offline media (missing, made offline, unreadable) renders
                                 as placeholder frames: the export then lists it in `offlineMedia`,
-                                warns on stderr and exits 1, unless --allow-offline accepts it
+                                warns on stderr and exits 1, unless --allow-offline accepts it;
+                                --on renders on another machine over ssh (it needs rsync and
+                                filmcraft-cli there): the used media are copied to its cache once,
+                                the file comes back to <out>
   export --list-presets [query] list export presets (name, category, format) as JSON
   render --seconds S --out f.png [--scale 0.5] [--allow-offline]
                                 render one Program frame to PNG (offline media: as for export)
@@ -113,6 +125,7 @@ OPTIONS
                                 default: the app's data directory)
   --keep-going                  `run`: report failing lines and continue
   --compact                     one-line JSON output
+  --progress                    long commands (exports) print `progress <0..1>` lines on stderr
 
 VALUES
   key=value parses value as JSON when it can (3.5, true, [1,2], {\"a\":1}), else as a string:
@@ -198,11 +211,16 @@ impl Backend {
             // long commands wait unless the caller says otherwise (#2342)
             Backend::Local(s) => {
                 // mask tracking is applied when its job finishes, which this process never sees (#3302)
-                if (filmcraft_automation::long_job::LONG_COMMANDS.contains(&id) || id == "masks.track")
+                if waits(id)
                     && let Some(p) = params.as_object_mut()
                 {
                     // anything but an explicit `false` (missing, null, a typo'd value) waits
                     if p.get("wait").and_then(Value::as_bool) != Some(false) {
+                        if PROGRESS.load(Ordering::Relaxed) && id != "masks.track" {
+                            // run it as a job and follow it, reporting progress on the way
+                            p.insert("wait".into(), json!(false));
+                            return follow_job(&mut *s, id, params).await;
+                        }
                         p.insert("wait".into(), json!(true));
                     }
                 }
@@ -228,6 +246,42 @@ impl Backend {
         if let Some(Err(e)) = r {
             fail(format!("saving: {e}"));
         }
+    }
+}
+
+/// Start `id` as a background job and wait for it, writing `progress <fraction>` lines to stderr
+/// (for scripts and remote renders that show a progress bar). The result matches a waited call:
+/// the job's `result` and `offlineMedia` are added, and a failed job is an error.
+async fn follow_job(s: &mut Session, id: &str, params: Value) -> Result<Value, String> {
+    let mut out = s.execute(id, params).map_err(|e| e.to_string())?;
+    let Some(job) = out.get("job").and_then(Value::as_u64) else { return Ok(out) };
+    let mut last = -1.0f64;
+    loop {
+        let jobs = s.execute("jobs.list", json!({})).map_err(|e| e.to_string())?;
+        let Some(j) = jobs.as_array().and_then(|a| a.iter().find(|j| j["id"].as_u64() == Some(job))).cloned() else {
+            return Err(format!("job {job} disappeared"));
+        };
+        let f = j["progress"].as_f64().filter(|f| f.is_finite()).unwrap_or(0.0).clamp(0.0, 1.0);
+        if (f - last).abs() >= 0.001 {
+            diag(format_args!("progress {f:.4}"));
+            last = f;
+        }
+        if j["finished"].as_bool() == Some(true) {
+            if let Some(e) = j["result"]["error"].as_str() {
+                return Err(format!("{id} failed: {e}"));
+            }
+            if let Some(o) = out.as_object_mut() {
+                o.remove("poll");
+                o.remove("cancel");
+            }
+            out["result"] = j["result"].clone();
+            if let Some(off) = j.get("offlineMedia") {
+                out["offlineMedia"] = off.clone();
+            }
+            return Ok(out);
+        }
+        // the export runs on its own thread; this process only polls it
+        std::thread::sleep(std::time::Duration::from_millis(200));
     }
 }
 
@@ -318,6 +372,7 @@ async fn cli() {
         outln!("filmcraft-cli {}", env!("CARGO_PKG_VERSION"));
         return;
     }
+    PROGRESS.store(a.flag("--progress"), Ordering::Relaxed);
     register_hardware_decoders();
     register_gpu_frame_renderer();
     let Some(cmd) = a.pos(0) else { usage("missing subcommand") };
@@ -502,9 +557,20 @@ async fn cli_export(a: &Args) {
     if let Some(v) = a.opt("--gpu-rendering") {
         p["gpuRendering"] = json!(v); // off | auto (validated by the export command)
     }
+    if let Some(host) = a.opt("--on") {
+        if a.flag("--queue") {
+            usage("export: --on renders now on the other machine; it can't be queued");
+        }
+        p["host"] = json!(host);
+        if let Some(cli) = a.opt("--remote-cli") {
+            p["remoteCli"] = json!(cli);
+        }
+    }
     let mut b = Backend::open(a);
     let t0 = std::time::Instant::now();
-    let r = if a.flag("--queue") {
+    let r = if a.opt("--on").is_some() {
+        b.exec("file.exportMediaRemote", p).await
+    } else if a.flag("--queue") {
         let mut q = p.clone();
         q["start"] = json!(true);
         b.exec("export.queue.add", q).await.and_then(|v| {

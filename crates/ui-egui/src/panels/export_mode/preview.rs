@@ -51,6 +51,10 @@ pub(super) fn preview_column(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Re
             .max_rect(Rect::from_min_max(pos2(rect.min.x + 14.0, pv_area.max.y + 8.0), pos2(rect.max.x - 14.0, rect.max.y - 50.0)))
             .id_salt("export-right"),
     );
+    if app.ui.export.remote_hosts.is_none() {
+        let hosts = app.session.execute("file.remoteHosts", json!({})).ok().and_then(|v| serde_json::from_value::<Vec<String>>(v).ok()).unwrap_or_default();
+        app.ui.export.remote_hosts = Some(hosts);
+    }
     let ex = &mut app.ui.export;
     let has_work_area = q.work_area.is_some();
     child.add_enabled_ui(!busy, |child| {
@@ -82,6 +86,25 @@ pub(super) fn preview_column(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Re
             let warning = tl!("Source In/Out is only 1 frame. Choose Entire Source to export the whole sequence.");
             let resp = child.add(egui::Label::new(egui::RichText::new(warning).color(t.danger)).wrap());
             reg.add("export.range.warning", resp.rect, warning);
+        }
+        // Render on: this computer, or another machine over ssh (a desktop, a server).
+        child.horizontal(|ui| {
+            ui.label(egui::RichText::new(tl!("Render on")).color(t.text_dim));
+            let this = tl!("This Computer");
+            let hosts = ex.remote_hosts.clone().unwrap_or_default();
+            let mut labels: Vec<(String, bool)> = vec![(this.to_string(), true)];
+            labels.extend(hosts.iter().map(|h| (h.clone(), true)));
+            let cur = if ex.render_on.is_empty() { this.to_string() } else { ex.render_on.clone() };
+            if let Some(i) = combo(ui, &mut reg, "export.renderOn", &cur, &labels, 140.0) {
+                ex.render_on = if i == 0 { String::new() } else { hosts.get(i - 1).cloned().unwrap_or_default() };
+            }
+            let resp = ui.add(egui::TextEdit::singleline(&mut ex.render_on).hint_text(tl!("ssh host")).desired_width(110.0));
+            reg.add("export.renderOn.host", resp.rect, "Render on host");
+        });
+        if !ex.render_on.trim().is_empty() {
+            let note = tl!("Media is copied to the other machine once; it needs filmcraft-cli and rsync.");
+            let resp = child.add(egui::Label::new(egui::RichText::new(note).color(t.text_dim).size(11.5)).wrap());
+            reg.add("export.renderOn.note", resp.rect, note);
         }
         if ex.settings.has_video() {
             child.horizontal(|ui| {
@@ -190,7 +213,14 @@ pub(super) fn preview_column(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Re
         if let Some(job) = active_job {
             job.progress.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         } else {
-            let r = app.session.execute("file.exportMedia", export_params(app));
+            let host = app.ui.export.render_on.trim().to_string();
+            let r = if host.is_empty() {
+                app.session.execute("file.exportMedia", export_params(app))
+            } else {
+                let mut p = export_params(app);
+                p["host"] = json!(host);
+                app.session.execute("file.exportMediaRemote", p)
+            };
             match r {
                 Ok(v) => app.ui.status = tlf!("Exporting {path}", path = v["path"].as_str().unwrap_or("")),
                 Err(e) => app.ui.status = e.to_string(),

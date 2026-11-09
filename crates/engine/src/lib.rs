@@ -49,6 +49,7 @@ pub mod project_tools;
 pub mod proxies;
 pub mod relink;
 pub mod remix;
+pub mod remote_render;
 pub mod scene_detect;
 pub mod scopes;
 pub mod sequence_extras;

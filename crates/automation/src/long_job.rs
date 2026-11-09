@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use crate::server::FilmcraftMcp;
 
 /// Engine commands that block until a render is written when called with `wait: true`.
-pub const LONG_COMMANDS: &[&str] = &["file.exportMedia"];
+pub const LONG_COMMANDS: &[&str] = &["file.exportMedia", "file.exportMediaRemote"];
 
 /// How often the job is polled (and at most how often progress is reported).
 const POLL: Duration = Duration::from_millis(100);

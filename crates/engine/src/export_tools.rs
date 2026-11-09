@@ -465,7 +465,7 @@ fn is_folder(x: &str) -> bool {
 
 /// Output path for `seq`: the `path` param (a file, or a directory ending in `/` or existing), else
 /// `<default dir>/<sequence name>.<ext>`; `suffix` distinguishes several items.
-fn output_path(s: &Session, p: &Value, seq: ItemId, settings: &ExportSettings, suffix: Option<usize>) -> String {
+pub(crate) fn output_path(s: &Session, p: &Value, seq: ItemId, settings: &ExportSettings, suffix: Option<usize>) -> String {
     let name = s.project.item(seq).map(|i| i.name.clone()).unwrap_or_else(|| "Sequence".into());
     let base = match str_p(p, "path").map(expand_home) {
         Some(x) if is_folder(&x) => Path::new(&x).join(file_safe(&name)).to_string_lossy().to_string(),
