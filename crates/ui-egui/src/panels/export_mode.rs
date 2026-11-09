@@ -81,6 +81,11 @@ pub struct ExportUi {
     /// Range follows them again (Source In/Out with marks set, else Entire Source; #2749). Part of
     /// the state, so a `ui.set` of other export fields keeps it (and a chosen Range stays).
     pub range_for: Option<(u64, Option<i64>, Option<i64>)>,
+    /// Render on: an ssh host the export runs on (`file.exportMediaRemote`); empty = this computer.
+    pub render_on: String,
+    /// Hosts offered for Render on (read once from `~/.ssh/config`).
+    #[serde(skip)]
+    pub remote_hosts: Option<Vec<String>>,
 }
 
 impl Default for ExportUi {
@@ -101,6 +106,8 @@ impl Default for ExportUi {
             quick_path: String::new(),
             quick_preset: String::new(),
             range_for: None,
+            render_on: String::new(),
+            remote_hosts: None,
         }
     }
 }

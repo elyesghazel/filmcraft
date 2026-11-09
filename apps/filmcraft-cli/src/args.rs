@@ -23,6 +23,8 @@ const VALUED: &[&str] = &[
     "--data-dir",
     "--settings",
     "--gpu-rendering",
+    "--on",
+    "--remote-cli",
 ];
 
 #[derive(Debug, Default)]
