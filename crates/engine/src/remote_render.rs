@@ -248,10 +248,22 @@ fn cancelled(prog: &Progress) -> bool {
     prog.cancel.load(Ordering::Relaxed)
 }
 
+/// Options for every ssh connection of a job. Never prompt: a job has no terminal to ask for a
+/// password or a host key on. On Unix the job's connections share one login (a render opens about
+/// seven, and each new login costs a second or more over a VPN); the shared connection closes a
+/// minute after the last use. Windows' OpenSSH can't share connections.
+fn ssh_options() -> Vec<&'static str> {
+    let mut o = vec!["-o", "BatchMode=yes", "-o", "ConnectTimeout=15"];
+    if cfg!(unix) {
+        o.extend(["-o", "ControlMaster=auto", "-o", "ControlPath=~/.ssh/filmcraft-%C", "-o", "ControlPersist=60"]);
+    }
+    o
+}
+
 fn ssh_base(host: &str) -> Command {
     let mut c = Command::new("ssh");
-    // never prompt: a job has no terminal to ask for a password or a host key on
-    c.args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "--", host]);
+    c.args(ssh_options());
+    c.args(["--", host]);
     c
 }
 
@@ -330,7 +342,8 @@ fn supervise(mut child: Child, prog: &Progress, mut on_line: impl FnMut(&str)) -
 /// The rsync command for one transfer; `-s` keeps remote paths from being split by the shell.
 fn rsync(from: &str, to: &str) -> Command {
     let mut c = Command::new("rsync");
-    c.args(["-s", "--partial", "--inplace", "--info=progress2", "-e", "ssh -o BatchMode=yes -o ConnectTimeout=15", "--", from, to]);
+    let ssh = format!("ssh {}", ssh_options().join(" "));
+    c.args(["-s", "--partial", "--inplace", "--info=progress2", "-e", &ssh, "--", from, to]);
     c.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
     c
 }
